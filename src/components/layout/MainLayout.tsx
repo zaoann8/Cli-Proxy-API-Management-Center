@@ -23,6 +23,7 @@ import {
   IconShield,
   IconTimer,
   IconActivity,
+  IconRefreshCw,
 } from '@/components/ui/icons';
 import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
 import {
@@ -47,6 +48,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   config: <IconSettings size={18} />,
   logs: <IconScrollText size={18} />,
   system: <IconInfo size={18} />,
+  inspection: <IconRefreshCw size={18} />,
   monitor: <IconActivity size={18} />,
 };
 
@@ -362,6 +364,11 @@ export function MainLayout() {
       ? [{ path: '/logs', label: t('nav.logs'), icon: sidebarIcons.logs }]
       : []),
     { path: '/system', label: t('nav.system_info'), icon: sidebarIcons.system },
+    {
+      path: '/auth-inspection',
+      label: t('nav.auth_inspection', { defaultValue: '认证巡检' }),
+      icon: sidebarIcons.inspection,
+    },
     { path: '/monitor', label: t('nav.monitor'), icon: sidebarIcons.monitor },
   ];
   const navOrder = navItems.map((item) => item.path);

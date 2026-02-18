@@ -352,10 +352,31 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
   const handleVerifyInvalid = useCallback(async () => {
     setVerifyingInvalid(true);
     try {
-      const response = await authFilesApi.verifyInvalid('codex', 20);
-      const checked = Number(response?.checked ?? 0);
-      const invalid = Number(response?.invalid ?? 0);
-      const valid = Number(response?.valid ?? 0);
+      const concurrency = 40;
+      const batchSize = 100;
+      const maxRounds = 2000;
+
+      let round = 0;
+      let cursor = 0;
+      let checked = 0;
+      let invalid = 0;
+      let valid = 0;
+      let done = false;
+
+      while (!done && round < maxRounds) {
+        const response = await authFilesApi.verifyInvalid('codex', concurrency, cursor, batchSize);
+        checked += Number(response?.checked ?? 0);
+        invalid += Number(response?.invalid ?? 0);
+        valid += Number(response?.valid ?? 0);
+
+        const total = Number(response?.total ?? 0);
+        const nextCursor = Number(response?.next_cursor ?? cursor);
+        const responseDone = Boolean(response?.done);
+        done = responseDone || nextCursor <= cursor || nextCursor >= total;
+        cursor = nextCursor;
+        round++;
+      }
+
       await loadFiles();
       if (checked === 0) {
         showNotification(t('auth_files.verify_invalid_none'), 'info');

@@ -1,0 +1,584 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Card } from '@/components/ui/Card';
+import { Button } from '@/components/ui/Button';
+import { Select, type SelectOption } from '@/components/ui/Select';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { IconActivity, IconRefreshCw, IconTimer, IconTrash2 } from '@/components/ui/icons';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { useInterval } from '@/hooks/useInterval';
+import { authFilesApi } from '@/services/api';
+import { useAuthStore, useNotificationStore } from '@/stores';
+import type { AuthFileItem } from '@/types';
+import styles from './AuthInspectionPage.module.scss';
+
+type InspectionState = {
+  enabled: boolean;
+  intervalSeconds: number;
+  autoDeleteInvalid: boolean;
+  running: boolean;
+  trigger: string;
+  currentFile: string;
+  recentChecked: string[];
+  checked: number;
+  valid: number;
+  invalid: number;
+  deleted: number;
+  total: number;
+  round: number;
+  lastError: string;
+  lastRunStartedAt: string;
+  lastRunFinished: string;
+  nextRunAt: string;
+};
+
+const scheduleOptions: SelectOption[] = [
+  { value: 'off', label: '关闭自动任务' },
+  { value: '3600', label: '每 1 小时' },
+  { value: '10800', label: '每 3 小时' },
+  { value: '21600', label: '每 6 小时' },
+  { value: '43200', label: '每 12 小时' },
+  { value: '86400', label: '每 24 小时' },
+];
+
+const toBool = (value: unknown): boolean => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase();
+    return text === '1' || text === 'true' || text === 'yes' || text === 'on';
+  }
+  return false;
+};
+
+const toNumber = (value: unknown, fallback = 0): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const toText = (value: unknown): string => String(value ?? '').trim();
+
+const toProvider = (item: AuthFileItem): string =>
+  String(item.provider ?? item.type ?? '')
+    .trim()
+    .toLowerCase();
+
+const isRuntimeOnly = (item: AuthFileItem): boolean => toBool(item.runtimeOnly);
+const isDisabled = (item: AuthFileItem): boolean => toBool(item.disabled);
+const isInvalid = (item: AuthFileItem): boolean => toBool(item.token_invalid);
+
+const defaultInspectionState: InspectionState = {
+  enabled: false,
+  intervalSeconds: 3600,
+  autoDeleteInvalid: false,
+  running: false,
+  trigger: '',
+  currentFile: '',
+  recentChecked: [],
+  checked: 0,
+  valid: 0,
+  invalid: 0,
+  deleted: 0,
+  total: 0,
+  round: 0,
+  lastError: '',
+  lastRunStartedAt: '',
+  lastRunFinished: '',
+  nextRunAt: '',
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const normalizeInspectionState = (raw: unknown): InspectionState => {
+  const data = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  return {
+    enabled: toBool(data.enabled),
+    intervalSeconds: Math.max(3600, toNumber(data.interval_seconds, 3600)),
+    autoDeleteInvalid: toBool(data.auto_delete_invalid),
+    running: toBool(data.running),
+    trigger: toText(data.trigger),
+    currentFile: toText(data.current_file),
+    recentChecked: Array.isArray(data.recent_checked)
+      ? data.recent_checked.map((item) => toText(item)).filter(Boolean).slice(-10)
+      : [],
+    checked: toNumber(data.checked),
+    valid: toNumber(data.valid),
+    invalid: toNumber(data.invalid),
+    deleted: toNumber(data.deleted),
+    total: toNumber(data.total),
+    round: toNumber(data.round),
+    lastError: toText(data.last_error),
+    lastRunStartedAt: toText(data.last_run_started_at),
+    lastRunFinished: toText(data.last_run_finished),
+    nextRunAt: toText(data.next_run_at),
+  };
+};
+
+export function AuthInspectionPage() {
+  const { t } = useTranslation();
+  const { showNotification, showConfirmation } = useNotificationStore();
+  const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const disableControls = connectionStatus !== 'connected';
+
+  const [files, setFiles] = useState<AuthFileItem[]>([]);
+  const [error, setError] = useState('');
+  const [inspection, setInspection] = useState<InspectionState>(defaultInspectionState);
+  const [scheduleValue, setScheduleValue] = useState('3600');
+  const [autoDeleteInvalid, setAutoDeleteInvalid] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [countdownSec, setCountdownSec] = useState(0);
+  const [configDirty, setConfigDirty] = useState(false);
+  const wasRunningRef = useRef(false);
+
+  const loadFiles = useCallback(
+    async (silent = false) => {
+      try {
+        const data = await authFilesApi.list();
+        setFiles(Array.isArray(data?.files) ? data.files : []);
+        setError('');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
+        if (!silent) showNotification(msg, 'error');
+        setError(msg);
+      }
+    },
+    [showNotification, t]
+  );
+
+  const loadInspectionStatus = useCallback(
+    async (silent = false): Promise<InspectionState | null> => {
+      try {
+        const resp = await authFilesApi.getInspectionStatus();
+        const normalized = normalizeInspectionState(resp?.inspection);
+        setInspection(normalized);
+        if (!configDirty) {
+          setScheduleValue(normalized.enabled ? String(normalized.intervalSeconds) : 'off');
+          setAutoDeleteInvalid(normalized.autoDeleteInvalid);
+        }
+        if (!silent) setError('');
+        return normalized;
+      } catch (err: unknown) {
+        if (!silent) {
+          const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
+          setError(msg);
+          showNotification(msg, 'error');
+        }
+        return null;
+      }
+    },
+    [configDirty, showNotification, t]
+  );
+
+  useHeaderRefresh(
+    useCallback(async () => {
+      await Promise.all([loadFiles(true), loadInspectionStatus(true)]);
+    }, [loadFiles, loadInspectionStatus])
+  );
+
+  useEffect(() => {
+    void Promise.all([loadFiles(), loadInspectionStatus()]);
+  }, [loadFiles, loadInspectionStatus]);
+
+  useEffect(() => {
+    const nextRunTs = Date.parse(inspection.nextRunAt);
+    if (!Number.isFinite(nextRunTs) || nextRunTs <= 0) {
+      setCountdownSec(0);
+      return;
+    }
+    const remaining = Math.max(0, Math.floor((nextRunTs - Date.now()) / 1000));
+    setCountdownSec(remaining);
+  }, [inspection.nextRunAt]);
+
+  useInterval(
+    () => {
+      setCountdownSec((prev) => (prev > 0 ? prev - 1 : 0));
+    },
+    inspection.enabled ? 1000 : null
+  );
+
+  const statusPollMs = testing ? 600 : inspection.running ? 1500 : 10000;
+  useInterval(
+    () => {
+      if (disableControls) return;
+      void loadInspectionStatus(true);
+    },
+    disableControls ? null : statusPollMs
+  );
+
+  useInterval(
+    () => {
+      if (disableControls || inspection.running) return;
+      void loadFiles(true);
+    },
+    disableControls ? null : 30000
+  );
+
+  useEffect(() => {
+    if (wasRunningRef.current && !inspection.running) {
+      void loadFiles(true);
+    }
+    wasRunningRef.current = inspection.running;
+  }, [inspection.running, loadFiles]);
+
+  const codexFiles = useMemo(
+    () =>
+      files.filter((item) => {
+        if (toProvider(item) !== 'codex') return false;
+        if (isRuntimeOnly(item)) return false;
+        return true;
+      }),
+    [files]
+  );
+  const activeCodexFiles = useMemo(() => codexFiles.filter((item) => !isDisabled(item)), [codexFiles]);
+  const invalidCodexFiles = useMemo(() => activeCodexFiles.filter((item) => isInvalid(item)), [activeCodexFiles]);
+  const invalidReasonTop = useMemo(
+    () =>
+      invalidCodexFiles
+        .map((item) => ({ name: item.name, reason: toText(item.token_invalid_reason) || '未记录原因' }))
+        .slice(0, 8),
+    [invalidCodexFiles]
+  );
+
+  const progressPercent =
+    inspection.total > 0
+      ? Math.max(0, Math.min(100, Math.round((inspection.checked / inspection.total) * 100)))
+      : 0;
+
+  const formatDuration = (seconds: number): string => {
+    if (!Number.isFinite(seconds) || seconds <= 0) return '0秒';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0 && m > 0) return `${h}小时${m}分钟`;
+    if (h > 0) return `${h}小时`;
+    if (m > 0 && s > 0) return `${m}分${s}秒`;
+    if (m > 0) return `${m}分钟`;
+    return `${s}秒`;
+  };
+
+  const saveInspectionConfig = useCallback(async () => {
+    if (disableControls) return;
+    const enabled = scheduleValue !== 'off';
+    const interval = enabled ? Math.max(3600, Number.parseInt(scheduleValue, 10) || 3600) : 3600;
+
+    setSavingConfig(true);
+    try {
+      await authFilesApi.updateInspectionConfig({
+        enabled,
+        interval_seconds: interval,
+        auto_delete_invalid: autoDeleteInvalid,
+      });
+      setConfigDirty(false);
+      await loadInspectionStatus(true);
+      showNotification(
+        t('auth_inspection.config_saved', { defaultValue: '自动巡检配置已保存到后端' }),
+        'success'
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      showNotification(`${t('notification.update_failed')}: ${msg}`, 'error');
+    } finally {
+      setSavingConfig(false);
+    }
+  }, [autoDeleteInvalid, disableControls, loadInspectionStatus, scheduleValue, showNotification, t]);
+
+  const runInspectionNow = useCallback(async () => {
+    if (disableControls || inspection.running) return;
+    try {
+      const resp = await authFilesApi.runInspectionNow();
+      const started = toBool(resp?.started);
+      if (!started) {
+        showNotification(
+          t('auth_inspection.already_running', { defaultValue: '巡检任务已在运行中' }),
+          'info'
+        );
+      } else {
+        showNotification(
+          t('auth_inspection.started', { defaultValue: '已触发后台巡检任务' }),
+          'success'
+        );
+      }
+      await loadInspectionStatus(true);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      showNotification(`${t('auth_files.verify_invalid_failed')}: ${msg}`, 'error');
+    }
+  }, [disableControls, inspection.running, loadInspectionStatus, showNotification, t]);
+
+  const runInspectionTest = useCallback(async () => {
+    if (disableControls || inspection.running || deleting || testing) return;
+    setTesting(true);
+    const baselineStartedAt = inspection.lastRunStartedAt;
+    try {
+      const resp = await authFilesApi.runInspectionNow();
+      const started = toBool(resp?.started);
+      if (!started) {
+        showNotification(
+          t('auth_inspection.already_running', { defaultValue: '巡检任务已在运行中' }),
+          'info'
+        );
+        await loadInspectionStatus(true);
+        return;
+      }
+
+      showNotification(
+        t('auth_inspection.test_started', { defaultValue: '测试巡检已启动，正在实时刷新执行过程' }),
+        'success'
+      );
+
+      const deadline = Date.now() + 30 * 60 * 1000;
+      let observedRun = false;
+      while (Date.now() < deadline) {
+        const state = await loadInspectionStatus(true);
+        if (state) {
+          if (state.running || state.lastRunStartedAt !== baselineStartedAt) {
+            observedRun = true;
+          }
+          if (observedRun && !state.running) {
+            break;
+          }
+        }
+        await sleep(600);
+      }
+
+      await loadFiles(true);
+      const finalState = await loadInspectionStatus(true);
+      showNotification(
+        t('auth_inspection.test_finished', {
+          defaultValue: '测试巡检结束：已检查 {{checked}}，失效 {{invalid}}',
+          checked: toNumber(finalState?.checked),
+          invalid: toNumber(finalState?.invalid),
+        }),
+        'success'
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      showNotification(`${t('auth_files.verify_invalid_failed')}: ${msg}`, 'error');
+    } finally {
+      setTesting(false);
+    }
+  }, [deleting, disableControls, inspection.lastRunStartedAt, inspection.running, loadFiles, loadInspectionStatus, showNotification, t, testing]);
+
+  const clearInvalid = useCallback(() => {
+    showConfirmation({
+      title: t('auth_files.delete_invalid_title', { defaultValue: '清理失效认证文件' }),
+      message: t('auth_files.delete_invalid_confirm'),
+      variant: 'danger',
+      confirmText: t('common.confirm'),
+      onConfirm: async () => {
+        setDeleting(true);
+        try {
+          const response = await authFilesApi.deleteInvalid();
+          const deletedCount = toNumber(response?.deleted);
+          const matchedCount = toNumber(response?.matched);
+          await loadFiles(true);
+          await loadInspectionStatus(true);
+          if (matchedCount === 0) {
+            showNotification(t('auth_files.delete_invalid_none'), 'info');
+          } else {
+            showNotification(
+              t('auth_files.delete_invalid_success', { deleted: deletedCount, matched: matchedCount }),
+              'success'
+            );
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : '';
+          showNotification(`${t('notification.delete_failed')}: ${msg}`, 'error');
+        } finally {
+          setDeleting(false);
+        }
+      },
+    });
+  }, [loadFiles, loadInspectionStatus, showConfirmation, showNotification, t]);
+
+  return (
+    <div className={styles.container}>
+      <div className={styles.pageHeader}>
+        <h1 className={styles.pageTitle}>{t('auth_inspection.title', { defaultValue: '认证巡检中心' })}</h1>
+        <p className={styles.description}>
+          {t('auth_inspection.desc', {
+            defaultValue: '后端持久化的自动巡检任务。页面关闭后任务仍会按小时继续运行。',
+          })}
+        </p>
+      </div>
+
+      <Card
+        title={t('auth_inspection.panel_title', { defaultValue: '巡检控制台' })}
+        extra={
+          <div className={styles.controlBar}>
+            <div className={styles.refreshMeta}>
+              <IconTimer size={16} />
+              <span>
+                {inspection.enabled
+                  ? t('auth_inspection.next_schedule', {
+                      defaultValue: '下次自动任务：{{duration}}后',
+                      duration: formatDuration(countdownSec),
+                    })
+                  : t('auth_inspection.schedule_off', { defaultValue: '自动任务已关闭' })}
+              </span>
+            </div>
+            <Select
+              value={scheduleValue}
+              options={scheduleOptions}
+              onChange={(value) => {
+                setScheduleValue(value);
+                setConfigDirty(true);
+              }}
+              ariaLabel={t('auth_inspection.schedule_label', { defaultValue: '任务频率' })}
+              fullWidth={false}
+            />
+            <ToggleSwitch
+              checked={autoDeleteInvalid}
+              onChange={(value) => {
+                setAutoDeleteInvalid(value);
+                setConfigDirty(true);
+              }}
+              label={t('auth_inspection.auto_delete', { defaultValue: '自动清理失效文件' })}
+              disabled={disableControls}
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={saveInspectionConfig}
+              disabled={disableControls || !configDirty || savingConfig}
+              loading={savingConfig}
+            >
+              {t('auth_inspection.save_config', { defaultValue: '保存策略' })}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={runInspectionNow}
+              disabled={disableControls || inspection.running || deleting || testing}
+            >
+              <span className={styles.btnInner}>
+                <IconRefreshCw size={16} />
+                <span>{t('auth_inspection.verify_now', { defaultValue: '立即触发任务' })}</span>
+              </span>
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={runInspectionTest}
+              disabled={disableControls || inspection.running || deleting || testing}
+              loading={testing}
+            >
+              <span className={styles.btnInner}>
+                <IconActivity size={16} />
+                <span>{t('auth_inspection.test_run', { defaultValue: '测试执行' })}</span>
+              </span>
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={clearInvalid}
+              disabled={disableControls || deleting || inspection.running || testing}
+              loading={deleting}
+            >
+              <span className={styles.btnInner}>
+                <IconTrash2 size={16} />
+                <span>{t('auth_inspection.clear_invalid', { defaultValue: '清理失效' })}</span>
+              </span>
+            </Button>
+          </div>
+        }
+      >
+        {error && <div className={styles.errorBox}>{error}</div>}
+
+        <div className={styles.summaryGrid}>
+          <div className={styles.summaryCard}>
+            <div className={styles.summaryLabel}>{t('auth_inspection.total_codex', { defaultValue: 'Codex 凭证总数' })}</div>
+            <div className={styles.summaryValue}>{codexFiles.length}</div>
+          </div>
+          <div className={styles.summaryCard}>
+            <div className={styles.summaryLabel}>{t('auth_inspection.active_codex', { defaultValue: '可巡检凭证' })}</div>
+            <div className={styles.summaryValue}>{activeCodexFiles.length}</div>
+          </div>
+          <div className={styles.summaryCard}>
+            <div className={styles.summaryLabel}>{t('auth_inspection.invalid_codex', { defaultValue: '已标记失效' })}</div>
+            <div className={`${styles.summaryValue} ${invalidCodexFiles.length > 0 ? styles.dangerText : ''}`}>
+              {invalidCodexFiles.length}
+            </div>
+          </div>
+          <div className={styles.summaryCard}>
+            <div className={styles.summaryLabel}>{t('auth_inspection.page_state', { defaultValue: '任务状态' })}</div>
+            <div className={styles.summaryValue}>
+              {inspection.running
+                ? t('auth_inspection.executing', { defaultValue: '运行中' })
+                : t('auth_inspection.idle', { defaultValue: '空闲' })}
+            </div>
+          </div>
+        </div>
+
+        <div className={styles.progressBlock}>
+          <div className={styles.progressMeta}>
+            <span>{t('auth_inspection.progress', { defaultValue: '巡检进度' })}</span>
+            <span>
+              {inspection.checked}/{inspection.total || activeCodexFiles.length} ({progressPercent}%)
+            </span>
+          </div>
+          <div className={`${styles.progressTrack} ${inspection.running ? styles.progressTrackRunning : ''}`}>
+            <div className={styles.progressFill} style={{ width: `${progressPercent}%` }} />
+          </div>
+          <div className={styles.progressSubMeta}>
+            <span>{t('auth_inspection.round', { defaultValue: '批次' })}: {inspection.round}</span>
+            <span>{t('auth_inspection.valid', { defaultValue: '有效' })}: {inspection.valid}</span>
+            <span>{t('auth_inspection.invalid', { defaultValue: '失效' })}: {inspection.invalid}</span>
+            <span>{t('auth_inspection.deleted', { defaultValue: '自动清理' })}: {inspection.deleted}</span>
+          </div>
+          <div className={styles.executionLine}>
+            <div className={styles.executionState}>
+              <span className={`${styles.stateDot} ${inspection.running ? styles.stateDotRunning : styles.stateDotIdle}`} />
+              <span>{inspection.running ? t('auth_inspection.executing', { defaultValue: '任务执行中' }) : t('auth_inspection.idle', { defaultValue: '任务空闲' })}</span>
+            </div>
+            <div className={`${styles.currentFilePill} ${inspection.running ? styles.currentFilePillRunning : ''}`}>
+              {t('auth_inspection.current_file', { defaultValue: '当前处理文件' })}: {inspection.currentFile || '-'}
+            </div>
+            <div className={styles.executionMeta}>
+              {t('auth_inspection.last_run', { defaultValue: '最近完成' })}: {inspection.lastRunFinished || '-'}
+            </div>
+          </div>
+          {inspection.lastError && (
+            <div className={styles.errorBox}>
+              {t('auth_inspection.last_error', { defaultValue: '最近错误' })}: {inspection.lastError}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <Card title={t('auth_inspection.recent_checked', { defaultValue: '最近处理轨迹（最新 10 条）' })}>
+        {inspection.recentChecked.length === 0 ? (
+          <div className={styles.emptyText}>{t('auth_inspection.recent_empty', { defaultValue: '本轮尚未产生处理轨迹。' })}</div>
+        ) : (
+          <div className={styles.trailList}>
+            {inspection.recentChecked.map((name, index) => (
+              <div key={`${name}-${index}`} className={styles.trailItem}>
+                <span className={styles.trailIndex}>#{index + 1}</span>
+                <span className={styles.trailName}>{name}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card title={t('auth_inspection.invalid_top', { defaultValue: '失效原因（Top 8）' })}>
+        {invalidReasonTop.length === 0 ? (
+          <div className={styles.emptyText}>
+            {t('auth_inspection.invalid_empty', { defaultValue: '当前没有已标记失效的 Codex 凭证。' })}
+          </div>
+        ) : (
+          <div className={styles.reasonList}>
+            {invalidReasonTop.map((item) => (
+              <div key={item.name} className={styles.reasonRow}>
+                <span className={styles.reasonName}>{item.name}</span>
+                <span className={styles.reasonText}>{item.reason}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}

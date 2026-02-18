@@ -112,6 +112,7 @@
     "config_management": "配置面板",
     "logs": "日志查看",
     "system_info": "中心信息",
+    "auth_inspection": "认证巡检",
     "monitor": "监控中心"
   },
   "dashboard": {

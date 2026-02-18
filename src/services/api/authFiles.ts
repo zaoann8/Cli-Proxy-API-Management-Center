@@ -10,15 +10,62 @@ type StatusError = { status?: number };
 type AuthFileStatusResponse = { status: string; disabled: boolean };
 type DeleteFailedResponse = { status?: string; deleted?: number; matched?: number; scope?: string };
 type DeleteInvalidResponse = { status?: string; deleted?: number; matched?: number; scope?: string };
+type VerifyInvalidItem = {
+  id?: string;
+  name?: string;
+  provider?: string;
+  invalid?: boolean;
+  reason?: string;
+};
+
 type VerifyInvalidResponse = {
   status?: string;
   scope?: string;
   provider?: string;
   concurrency?: number;
+  batch_size?: number;
+  cursor?: number;
+  next_cursor?: number;
+  total?: number;
+  done?: boolean;
   checked?: number;
   valid?: number;
   invalid?: number;
   skipped?: number;
+  results?: VerifyInvalidItem[];
+};
+
+type AuthInspectionConfigResponse = {
+  enabled?: boolean;
+  interval_seconds?: number;
+  auto_delete_invalid?: boolean;
+  min_interval_seconds?: number;
+  max_interval_seconds?: number;
+};
+
+type AuthInspectionStatusItem = {
+  enabled?: boolean;
+  interval_seconds?: number;
+  auto_delete_invalid?: boolean;
+  running?: boolean;
+  trigger?: string;
+  current_file?: string;
+  recent_checked?: string[];
+  checked?: number;
+  valid?: number;
+  invalid?: number;
+  deleted?: number;
+  total?: number;
+  round?: number;
+  last_error?: string;
+  last_run_started_at?: string;
+  last_run_finished?: string;
+  next_run_at?: string;
+};
+
+type AuthInspectionStatusResponse = {
+  status?: string;
+  inspection?: AuthInspectionStatusItem;
 };
 
 const getStatusCode = (err: unknown): number | undefined => {
@@ -142,11 +189,34 @@ export const authFilesApi = {
       timeout: 300000
     }),
 
-  verifyInvalid: (provider: string = 'codex', concurrency: number = 20) =>
+  verifyInvalid: (
+    provider: string = 'codex',
+    concurrency: number = 20,
+    cursor: number = 0,
+    batchSize: number = 100
+  ) =>
     apiClient.post<VerifyInvalidResponse>('/auth-files/verify-invalid', null, {
-      params: { provider, concurrency },
+      params: { provider, concurrency, cursor, batch_size: batchSize },
       timeout: 300000
     }),
+
+  getInspectionConfig: () =>
+    apiClient.get<AuthInspectionConfigResponse>('/auth-files/inspection-config'),
+
+  updateInspectionConfig: (payload: {
+    enabled?: boolean;
+    interval_seconds?: number;
+    auto_delete_invalid?: boolean;
+  }) =>
+    apiClient.put<AuthInspectionConfigResponse>('/auth-files/inspection-config', payload),
+
+  getInspectionStatus: () =>
+    apiClient.get<AuthInspectionStatusResponse>('/auth-files/inspection-status'),
+
+  runInspectionNow: () =>
+    apiClient.post<{ status?: string; started?: boolean; inspection?: AuthInspectionStatusItem }>(
+      '/auth-files/inspection-run'
+    ),
 
   downloadText: async (name: string): Promise<string> => {
     const response = await apiClient.getRaw(`/auth-files/download?name=${encodeURIComponent(name)}`, {

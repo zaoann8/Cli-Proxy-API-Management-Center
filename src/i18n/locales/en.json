@@ -112,6 +112,7 @@
     "config_management": "Config Panel",
     "logs": "Logs Viewer",
     "system_info": "Management Center Info",
+    "auth_inspection": "Auth Inspection",
     "monitor": "Monitor Center"
   },
   "dashboard": {
