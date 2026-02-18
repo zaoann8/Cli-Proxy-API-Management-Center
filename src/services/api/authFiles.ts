@@ -14,6 +14,7 @@ type VerifyInvalidResponse = {
   status?: string;
   scope?: string;
   provider?: string;
+  concurrency?: number;
   checked?: number;
   valid?: number;
   invalid?: number;
@@ -129,14 +130,22 @@ export const authFilesApi = {
 
   deleteAll: () => apiClient.delete('/auth-files', { params: { all: true } }),
 
-  deleteFailed: () => apiClient.delete<DeleteFailedResponse>('/auth-files', { params: { failed: true } }),
+  deleteFailed: () =>
+    apiClient.delete<DeleteFailedResponse>('/auth-files', {
+      params: { failed: true },
+      timeout: 300000
+    }),
 
-  deleteInvalid: () => apiClient.delete<DeleteInvalidResponse>('/auth-files', { params: { invalid: true } }),
+  deleteInvalid: () =>
+    apiClient.delete<DeleteInvalidResponse>('/auth-files', {
+      params: { invalid: true },
+      timeout: 300000
+    }),
 
-  verifyInvalid: (provider: string = 'codex') =>
+  verifyInvalid: (provider: string = 'codex', concurrency: number = 20) =>
     apiClient.post<VerifyInvalidResponse>('/auth-files/verify-invalid', null, {
-      params: { provider },
-      timeout: 180000
+      params: { provider, concurrency },
+      timeout: 300000
     }),
 
   downloadText: async (name: string): Promise<string> => {

@@ -352,7 +352,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
   const handleVerifyInvalid = useCallback(async () => {
     setVerifyingInvalid(true);
     try {
-      const response = await authFilesApi.verifyInvalid('codex');
+      const response = await authFilesApi.verifyInvalid('codex', 20);
       const checked = Number(response?.checked ?? 0);
       const invalid = Number(response?.invalid ?? 0);
       const valid = Number(response?.valid ?? 0);
