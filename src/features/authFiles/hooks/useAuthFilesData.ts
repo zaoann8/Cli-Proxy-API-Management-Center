@@ -22,6 +22,7 @@ export type UseAuthFilesDataResult = {
   uploading: boolean;
   deleting: string | null;
   deletingAll: boolean;
+  deletingFailed: boolean;
   statusUpdating: Record<string, boolean>;
   fileInputRef: RefObject<HTMLInputElement | null>;
   loadFiles: () => Promise<void>;
@@ -29,6 +30,7 @@ export type UseAuthFilesDataResult = {
   handleFileChange: (event: ChangeEvent<HTMLInputElement>) => Promise<void>;
   handleDelete: (name: string) => void;
   handleDeleteAll: (options: DeleteAllOptions) => void;
+  handleDeleteFailed: () => void;
   handleDownload: (name: string) => Promise<void>;
   handleStatusToggle: (item: AuthFileItem, enabled: boolean) => Promise<void>;
   toggleSelect: (name: string) => void;
@@ -53,6 +55,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
+  const [deletingFailed, setDeletingFailed] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({});
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
 
@@ -308,6 +311,38 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     [deselectAll, files, showConfirmation, showNotification, t]
   );
 
+  const handleDeleteFailed = useCallback(() => {
+    showConfirmation({
+      title: t('auth_files.delete_failed_title', { defaultValue: 'Clear Failed Auth Files' }),
+      message: t('auth_files.delete_failed_confirm'),
+      variant: 'danger',
+      confirmText: t('common.confirm'),
+      onConfirm: async () => {
+        setDeletingFailed(true);
+        try {
+          const response = await authFilesApi.deleteFailed();
+          const deletedCount = Number(response?.deleted ?? 0);
+          const matchedCount = Number(response?.matched ?? 0);
+          await loadFiles();
+          await refreshKeyStats();
+          if (matchedCount === 0) {
+            showNotification(t('auth_files.delete_failed_none'), 'info');
+          } else {
+            showNotification(
+              t('auth_files.delete_failed_success', { deleted: deletedCount, matched: matchedCount }),
+              'success'
+            );
+          }
+        } catch (err: unknown) {
+          const errorMessage = err instanceof Error ? err.message : '';
+          showNotification(`${t('notification.delete_failed')}: ${errorMessage}`, 'error');
+        } finally {
+          setDeletingFailed(false);
+        }
+      }
+    });
+  }, [loadFiles, refreshKeyStats, showConfirmation, showNotification, t]);
+
   const handleDownload = useCallback(
     async (name: string) => {
       try {
@@ -501,6 +536,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     uploading,
     deleting,
     deletingAll,
+    deletingFailed,
     statusUpdating,
     fileInputRef,
     loadFiles,
@@ -508,6 +544,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     handleFileChange,
     handleDelete,
     handleDeleteAll,
+    handleDeleteFailed,
     handleDownload,
     handleStatusToggle,
     toggleSelect,

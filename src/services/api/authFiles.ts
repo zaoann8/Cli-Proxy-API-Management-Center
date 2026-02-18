@@ -8,6 +8,7 @@ import type { OAuthModelAliasEntry } from '@/types';
 
 type StatusError = { status?: number };
 type AuthFileStatusResponse = { status: string; disabled: boolean };
+type DeleteFailedResponse = { status?: string; deleted?: number; matched?: number; scope?: string };
 
 const getStatusCode = (err: unknown): number | undefined => {
   if (!err || typeof err !== 'object') return undefined;
@@ -117,6 +118,8 @@ export const authFilesApi = {
   deleteFile: (name: string) => apiClient.delete(`/auth-files?name=${encodeURIComponent(name)}`),
 
   deleteAll: () => apiClient.delete('/auth-files', { params: { all: true } }),
+
+  deleteFailed: () => apiClient.delete<DeleteFailedResponse>('/auth-files', { params: { failed: true } }),
 
   downloadText: async (name: string): Promise<string> => {
     const response = await apiClient.getRaw(`/auth-files/download?name=${encodeURIComponent(name)}`, {

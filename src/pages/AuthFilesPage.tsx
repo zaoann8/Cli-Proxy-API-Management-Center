@@ -72,6 +72,7 @@ export function AuthFilesPage() {
     uploading,
     deleting,
     deletingAll,
+    deletingFailed,
     statusUpdating,
     fileInputRef,
     loadFiles,
@@ -79,6 +80,7 @@ export function AuthFilesPage() {
     handleFileChange,
     handleDelete,
     handleDeleteAll,
+    handleDeleteFailed,
     handleDownload,
     handleStatusToggle,
     toggleSelect,
@@ -423,6 +425,15 @@ export function AuthFilesPage() {
         title={titleNode}
         extra={
           <div className={styles.headerActions}>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleDeleteFailed}
+              disabled={disableControls || loading || deletingFailed}
+              loading={deletingFailed}
+            >
+              {t('auth_files.delete_failed_button')}
+            </Button>
             <Button variant="secondary" size="sm" onClick={handleHeaderRefresh} disabled={loading}>
               {t('common.refresh')}
             </Button>
