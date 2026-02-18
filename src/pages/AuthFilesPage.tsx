@@ -72,7 +72,6 @@ export function AuthFilesPage() {
     uploading,
     deleting,
     deletingAll,
-    deletingFailed,
     verifyingInvalid,
     deletingInvalid,
     statusUpdating,
@@ -82,7 +81,6 @@ export function AuthFilesPage() {
     handleFileChange,
     handleDelete,
     handleDeleteAll,
-    handleDeleteFailed,
     handleVerifyInvalid,
     handleDeleteInvalid,
     handleDownload,
@@ -446,15 +444,6 @@ export function AuthFilesPage() {
               loading={deletingInvalid}
             >
               {t('auth_files.delete_invalid_button')}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={handleDeleteFailed}
-              disabled={disableControls || loading || deletingFailed}
-              loading={deletingFailed}
-            >
-              {t('auth_files.delete_failed_button')}
             </Button>
             <Button variant="secondary" size="sm" onClick={handleHeaderRefresh} disabled={loading}>
               {t('common.refresh')}

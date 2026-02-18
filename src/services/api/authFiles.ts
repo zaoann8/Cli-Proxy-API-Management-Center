@@ -134,7 +134,10 @@ export const authFilesApi = {
   deleteInvalid: () => apiClient.delete<DeleteInvalidResponse>('/auth-files', { params: { invalid: true } }),
 
   verifyInvalid: (provider: string = 'codex') =>
-    apiClient.post<VerifyInvalidResponse>('/auth-files/verify-invalid', null, { params: { provider } }),
+    apiClient.post<VerifyInvalidResponse>('/auth-files/verify-invalid', null, {
+      params: { provider },
+      timeout: 180000
+    }),
 
   downloadText: async (name: string): Promise<string> => {
     const response = await apiClient.getRaw(`/auth-files/download?name=${encodeURIComponent(name)}`, {
