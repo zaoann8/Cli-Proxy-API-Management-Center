@@ -48,6 +48,23 @@ const resolveQuotaType = (file: AuthFileItem): QuotaProviderType | null => {
   return provider as QuotaProviderType;
 };
 
+const resolveTokenInvalid = (file: AuthFileItem): boolean => {
+  const raw = file['token_invalid'];
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'string') {
+    const normalized = raw.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+  }
+  if (typeof raw === 'number') return raw !== 0;
+  return false;
+};
+
+const resolveTokenInvalidReason = (file: AuthFileItem): string => {
+  const raw = file['token_invalid_reason'];
+  if (typeof raw !== 'string') return '';
+  return raw.trim();
+};
+
 export function AuthFileCard(props: AuthFileCardProps) {
   const { t } = useTranslation();
   const {
@@ -95,6 +112,8 @@ export function AuthFileCard(props: AuthFileCardProps) {
   const authIndexKey = normalizeAuthIndexValue(rawAuthIndex);
   const statusData =
     (authIndexKey && statusBarCache.get(authIndexKey)) || calculateStatusBarData([]);
+  const tokenInvalid = resolveTokenInvalid(file);
+  const tokenInvalidReason = resolveTokenInvalidReason(file);
 
   return (
     <div
@@ -145,6 +164,12 @@ export function AuthFileCard(props: AuthFileCardProps) {
               {t('stats.failure')}: {fileStats.failure}
             </span>
           </div>
+          {tokenInvalid && (
+            <div className={styles.invalidReason} title={tokenInvalidReason || undefined}>
+              {t('auth_files.invalid_reason_label')}:{' '}
+              {tokenInvalidReason || t('auth_files.invalid_reason_unknown')}
+            </div>
+          )}
 
           <ProviderStatusBar statusData={statusData} styles={styles} />
 

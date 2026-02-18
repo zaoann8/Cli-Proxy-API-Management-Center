@@ -73,6 +73,8 @@ export function AuthFilesPage() {
     deleting,
     deletingAll,
     deletingFailed,
+    verifyingInvalid,
+    deletingInvalid,
     statusUpdating,
     fileInputRef,
     loadFiles,
@@ -81,6 +83,8 @@ export function AuthFilesPage() {
     handleDelete,
     handleDeleteAll,
     handleDeleteFailed,
+    handleVerifyInvalid,
+    handleDeleteInvalid,
     handleDownload,
     handleStatusToggle,
     toggleSelect,
@@ -425,6 +429,24 @@ export function AuthFilesPage() {
         title={titleNode}
         extra={
           <div className={styles.headerActions}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleVerifyInvalid}
+              disabled={disableControls || loading || verifyingInvalid}
+              loading={verifyingInvalid}
+            >
+              {t('auth_files.verify_invalid_button')}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleDeleteInvalid}
+              disabled={disableControls || loading || deletingInvalid}
+              loading={deletingInvalid}
+            >
+              {t('auth_files.delete_invalid_button')}
+            </Button>
             <Button
               variant="danger"
               size="sm"

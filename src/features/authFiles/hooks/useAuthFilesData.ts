@@ -23,6 +23,8 @@ export type UseAuthFilesDataResult = {
   deleting: string | null;
   deletingAll: boolean;
   deletingFailed: boolean;
+  verifyingInvalid: boolean;
+  deletingInvalid: boolean;
   statusUpdating: Record<string, boolean>;
   fileInputRef: RefObject<HTMLInputElement | null>;
   loadFiles: () => Promise<void>;
@@ -31,6 +33,8 @@ export type UseAuthFilesDataResult = {
   handleDelete: (name: string) => void;
   handleDeleteAll: (options: DeleteAllOptions) => void;
   handleDeleteFailed: () => void;
+  handleVerifyInvalid: () => Promise<void>;
+  handleDeleteInvalid: () => void;
   handleDownload: (name: string) => Promise<void>;
   handleStatusToggle: (item: AuthFileItem, enabled: boolean) => Promise<void>;
   toggleSelect: (name: string) => void;
@@ -56,6 +60,8 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
   const [deletingFailed, setDeletingFailed] = useState(false);
+  const [verifyingInvalid, setVerifyingInvalid] = useState(false);
+  const [deletingInvalid, setDeletingInvalid] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({});
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
 
@@ -343,6 +349,62 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     });
   }, [loadFiles, refreshKeyStats, showConfirmation, showNotification, t]);
 
+  const handleVerifyInvalid = useCallback(async () => {
+    setVerifyingInvalid(true);
+    try {
+      const response = await authFilesApi.verifyInvalid('codex');
+      const checked = Number(response?.checked ?? 0);
+      const invalid = Number(response?.invalid ?? 0);
+      const valid = Number(response?.valid ?? 0);
+      await loadFiles();
+      if (checked === 0) {
+        showNotification(t('auth_files.verify_invalid_none'), 'info');
+      } else {
+        showNotification(
+          t('auth_files.verify_invalid_success', { checked, invalid, valid }),
+          invalid > 0 ? 'warning' : 'success'
+        );
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : '';
+      showNotification(`${t('auth_files.verify_invalid_failed')}: ${errorMessage}`, 'error');
+    } finally {
+      setVerifyingInvalid(false);
+    }
+  }, [loadFiles, showNotification, t]);
+
+  const handleDeleteInvalid = useCallback(() => {
+    showConfirmation({
+      title: t('auth_files.delete_invalid_title', { defaultValue: 'Clear Invalid Auth Files' }),
+      message: t('auth_files.delete_invalid_confirm'),
+      variant: 'danger',
+      confirmText: t('common.confirm'),
+      onConfirm: async () => {
+        setDeletingInvalid(true);
+        try {
+          const response = await authFilesApi.deleteInvalid();
+          const deletedCount = Number(response?.deleted ?? 0);
+          const matchedCount = Number(response?.matched ?? 0);
+          await loadFiles();
+          await refreshKeyStats();
+          if (matchedCount === 0) {
+            showNotification(t('auth_files.delete_invalid_none'), 'info');
+          } else {
+            showNotification(
+              t('auth_files.delete_invalid_success', { deleted: deletedCount, matched: matchedCount }),
+              'success'
+            );
+          }
+        } catch (err: unknown) {
+          const errorMessage = err instanceof Error ? err.message : '';
+          showNotification(`${t('notification.delete_failed')}: ${errorMessage}`, 'error');
+        } finally {
+          setDeletingInvalid(false);
+        }
+      }
+    });
+  }, [loadFiles, refreshKeyStats, showConfirmation, showNotification, t]);
+
   const handleDownload = useCallback(
     async (name: string) => {
       try {
@@ -537,6 +599,8 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     deleting,
     deletingAll,
     deletingFailed,
+    verifyingInvalid,
+    deletingInvalid,
     statusUpdating,
     fileInputRef,
     loadFiles,
@@ -545,6 +609,8 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     handleDelete,
     handleDeleteAll,
     handleDeleteFailed,
+    handleVerifyInvalid,
+    handleDeleteInvalid,
     handleDownload,
     handleStatusToggle,
     toggleSelect,

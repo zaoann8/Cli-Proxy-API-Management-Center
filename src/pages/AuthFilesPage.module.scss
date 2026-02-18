@@ -617,6 +617,18 @@
   margin-top: $spacing-xs;
 }
 
+.invalidReason {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #b91c1c;
+  background-color: color-mix(in srgb, #fecaca 45%, transparent);
+  border: 1px solid color-mix(in srgb, #fecaca 70%, transparent);
+  word-break: break-word;
+}
+
 .statPill {
   display: inline-flex;
   align-items: center;

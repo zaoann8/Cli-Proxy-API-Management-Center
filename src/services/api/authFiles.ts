@@ -9,6 +9,16 @@ import type { OAuthModelAliasEntry } from '@/types';
 type StatusError = { status?: number };
 type AuthFileStatusResponse = { status: string; disabled: boolean };
 type DeleteFailedResponse = { status?: string; deleted?: number; matched?: number; scope?: string };
+type DeleteInvalidResponse = { status?: string; deleted?: number; matched?: number; scope?: string };
+type VerifyInvalidResponse = {
+  status?: string;
+  scope?: string;
+  provider?: string;
+  checked?: number;
+  valid?: number;
+  invalid?: number;
+  skipped?: number;
+};
 
 const getStatusCode = (err: unknown): number | undefined => {
   if (!err || typeof err !== 'object') return undefined;
@@ -120,6 +130,11 @@ export const authFilesApi = {
   deleteAll: () => apiClient.delete('/auth-files', { params: { all: true } }),
 
   deleteFailed: () => apiClient.delete<DeleteFailedResponse>('/auth-files', { params: { failed: true } }),
+
+  deleteInvalid: () => apiClient.delete<DeleteInvalidResponse>('/auth-files', { params: { invalid: true } }),
+
+  verifyInvalid: (provider: string = 'codex') =>
+    apiClient.post<VerifyInvalidResponse>('/auth-files/verify-invalid', null, { params: { provider } }),
 
   downloadText: async (name: string): Promise<string> => {
     const response = await apiClient.getRaw(`/auth-files/download?name=${encodeURIComponent(name)}`, {
