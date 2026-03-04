@@ -68,6 +68,18 @@ type AuthInspectionStatusResponse = {
   inspection?: AuthInspectionStatusItem;
 };
 
+type UploadAuthBatchFailure = {
+  name?: string;
+  error?: string;
+};
+
+type UploadAuthBatchResponse = {
+  status?: string;
+  uploaded?: number;
+  total?: number;
+  failed?: UploadAuthBatchFailure[];
+};
+
 const getStatusCode = (err: unknown): number | undefined => {
   if (!err || typeof err !== 'object') return undefined;
   if ('status' in err) return (err as StatusError).status;
@@ -173,7 +185,15 @@ export const authFilesApi = {
   upload: (file: File) => {
     const formData = new FormData();
     formData.append('file', file, file.name);
-    return apiClient.postForm('/auth-files', formData);
+    return apiClient.postForm('/auth-files', formData, { timeout: 300000 });
+  },
+
+  uploadBatch: (files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => {
+      formData.append('files', file, file.name);
+    });
+    return apiClient.postForm<UploadAuthBatchResponse>('/auth-files', formData, { timeout: 300000 });
   },
 
   deleteFile: (name: string) => apiClient.delete(`/auth-files?name=${encodeURIComponent(name)}`),

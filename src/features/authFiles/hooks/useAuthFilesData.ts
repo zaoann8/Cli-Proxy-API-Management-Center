@@ -13,6 +13,20 @@ type DeleteAllOptions = {
   onResetFilterToAll: () => void;
 };
 
+const UPLOAD_BATCH_SIZE = 50;
+const UPLOAD_BATCH_RETRIES = 2;
+const VERIFY_INVALID_CONCURRENCY = 80;
+const VERIFY_INVALID_BATCH_SIZE = 200;
+
+const chunkFiles = (files: File[], size: number): File[][] => {
+  const batchSize = Math.max(1, size);
+  const batches: File[][] = [];
+  for (let i = 0; i < files.length; i += batchSize) {
+    batches.push(files.slice(i, i + batchSize));
+  }
+  return batches;
+};
+
 export type UseAuthFilesDataResult = {
   files: AuthFileItem[];
   selectedFiles: Set<string>;
@@ -167,33 +181,90 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
       let successCount = 0;
       const failed: { name: string; message: string }[] = [];
 
-      for (const file of validFiles) {
-        try {
-          await authFilesApi.upload(file);
-          successCount++;
-        } catch (err: unknown) {
-          const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-          failed.push({ name: file.name, message: errorMessage });
+      try {
+        const batches = chunkFiles(validFiles, UPLOAD_BATCH_SIZE);
+        for (const batch of batches) {
+          let batchDone = false;
+          for (let attempt = 1; attempt <= UPLOAD_BATCH_RETRIES; attempt++) {
+            try {
+              const resp = await authFilesApi.uploadBatch(batch);
+              const failedItems = Array.isArray(resp?.failed) ? resp.failed : [];
+              const failedByName = new Map<string, string>();
+              failedItems.forEach((item) => {
+                const name = String(item?.name ?? '').trim();
+                if (!name) return;
+                const message = String(item?.error ?? '').trim() || 'Unknown error';
+                failedByName.set(name, message);
+              });
+
+              for (const file of batch) {
+                const errMsg = failedByName.get(file.name);
+                if (errMsg) {
+                  failed.push({ name: file.name, message: errMsg });
+                  continue;
+                }
+                successCount++;
+              }
+              batchDone = true;
+              break;
+            } catch (err: unknown) {
+              if (attempt >= UPLOAD_BATCH_RETRIES) {
+                const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+                for (const file of batch) {
+                  failed.push({ name: file.name, message: errorMessage });
+                }
+              }
+            }
+          }
+
+          if (!batchDone) {
+            continue;
+          }
         }
-      }
 
-      if (successCount > 0) {
-        const suffix = validFiles.length > 1 ? ` (${successCount}/${validFiles.length})` : '';
-        showNotification(
-          `${t('auth_files.upload_success')}${suffix}`,
-          failed.length ? 'warning' : 'success'
-        );
-        await loadFiles();
-        await refreshKeyStats();
-      }
+        if (failed.length > 0) {
+          const failedSet = new Set(failed.map((item) => item.name));
+          const fallbackFiles = validFiles.filter((file) => failedSet.has(file.name));
+          const fallbackFailed: { name: string; message: string }[] = [];
+          successCount = validFiles.length - fallbackFiles.length;
 
-      if (failed.length > 0) {
-        const details = failed.map((item) => `${item.name}: ${item.message}`).join('; ');
-        showNotification(`${t('notification.upload_failed')}: ${details}`, 'error');
-      }
+          for (const file of fallbackFiles) {
+            try {
+              await authFilesApi.upload(file);
+              successCount++;
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : 'Unknown error';
+              fallbackFailed.push({ name: file.name, message });
+            }
+          }
 
-      setUploading(false);
-      event.target.value = '';
+          failed.length = 0;
+          failed.push(...fallbackFailed);
+        }
+
+        if (successCount > 0) {
+          const suffix = validFiles.length > 1 ? ` (${successCount}/${validFiles.length})` : '';
+          showNotification(
+            `${t('auth_files.upload_success')}${suffix}`,
+            failed.length ? 'warning' : 'success'
+          );
+          await loadFiles();
+          await refreshKeyStats();
+        }
+
+        if (failed.length > 0) {
+          const maxFailureDetails = 10;
+          const details = failed
+            .slice(0, maxFailureDetails)
+            .map((item) => `${item.name}: ${item.message}`)
+            .join('; ');
+          const tail = failed.length > maxFailureDetails ? ` ...(+${failed.length - maxFailureDetails})` : '';
+          showNotification(`${t('notification.upload_failed')}: ${details}${tail}`, 'error');
+        }
+      } finally {
+        setUploading(false);
+        event.target.value = '';
+      }
     },
     [loadFiles, refreshKeyStats, showNotification, t]
   );
@@ -352,8 +423,6 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
   const handleVerifyInvalid = useCallback(async () => {
     setVerifyingInvalid(true);
     try {
-      const concurrency = 40;
-      const batchSize = 100;
       const maxRounds = 2000;
 
       let round = 0;
@@ -364,7 +433,12 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
       let done = false;
 
       while (!done && round < maxRounds) {
-        const response = await authFilesApi.verifyInvalid('codex', concurrency, cursor, batchSize);
+        const response = await authFilesApi.verifyInvalid(
+          'codex',
+          VERIFY_INVALID_CONCURRENCY,
+          cursor,
+          VERIFY_INVALID_BATCH_SIZE
+        );
         checked += Number(response?.checked ?? 0);
         invalid += Number(response?.invalid ?? 0);
         valid += Number(response?.valid ?? 0);
