@@ -87,8 +87,6 @@ const defaultInspectionState: InspectionState = {
   nextRunAt: '',
 };
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const normalizeInspectionState = (raw: unknown): InspectionState => {
   const data = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
   return {
@@ -131,6 +129,13 @@ export function AuthInspectionPage() {
   const [countdownSec, setCountdownSec] = useState(0);
   const [configDirty, setConfigDirty] = useState(false);
   const wasRunningRef = useRef(false);
+  const statusLoadingRef = useRef(false);
+  const latestInspectionRef = useRef<InspectionState>(defaultInspectionState);
+  const testSessionRef = useRef<{
+    baselineStartedAt: string;
+    observedRun: boolean;
+    deadlineAt: number;
+  } | null>(null);
 
   const loadFiles = useCallback(
     async (silent = false) => {
@@ -149,10 +154,15 @@ export function AuthInspectionPage() {
 
   const loadInspectionStatus = useCallback(
     async (silent = false): Promise<InspectionState | null> => {
+      if (statusLoadingRef.current) {
+        return latestInspectionRef.current;
+      }
+      statusLoadingRef.current = true;
       try {
         const resp = await authFilesApi.getInspectionStatus();
         const normalized = normalizeInspectionState(resp?.inspection);
         setInspection(normalized);
+        latestInspectionRef.current = normalized;
         if (!configDirty) {
           setScheduleValue(normalized.enabled ? String(normalized.intervalSeconds) : 'off');
           setAutoDeleteInvalid(normalized.autoDeleteInvalid);
@@ -166,6 +176,8 @@ export function AuthInspectionPage() {
           showNotification(msg, 'error');
         }
         return null;
+      } finally {
+        statusLoadingRef.current = false;
       }
     },
     [configDirty, showNotification, t]
@@ -182,6 +194,7 @@ export function AuthInspectionPage() {
   }, [loadFiles, loadInspectionStatus]);
 
   useEffect(() => {
+    latestInspectionRef.current = inspection;
     const nextRunTs = Date.parse(inspection.nextRunAt);
     if (!Number.isFinite(nextRunTs) || nextRunTs <= 0) {
       setCountdownSec(0);
@@ -198,7 +211,7 @@ export function AuthInspectionPage() {
     inspection.enabled ? 1000 : null
   );
 
-  const statusPollMs = testing ? 600 : inspection.running ? 1500 : 10000;
+  const statusPollMs = inspection.running || testing ? 2500 : 10000;
   useInterval(
     () => {
       if (disableControls) return;
@@ -309,8 +322,6 @@ export function AuthInspectionPage() {
 
   const runInspectionTest = useCallback(async () => {
     if (disableControls || inspection.running || deleting || testing) return;
-    setTesting(true);
-    const baselineStartedAt = inspection.lastRunStartedAt;
     try {
       const resp = await authFilesApi.runInspectionNow();
       const started = toBool(resp?.started);
@@ -323,43 +334,63 @@ export function AuthInspectionPage() {
         return;
       }
 
+      testSessionRef.current = {
+        baselineStartedAt: inspection.lastRunStartedAt,
+        observedRun: false,
+        deadlineAt: Date.now() + 30 * 60 * 1000,
+      };
+      setTesting(true);
       showNotification(
         t('auth_inspection.test_started', { defaultValue: '测试巡检已启动，正在实时刷新执行过程' }),
         'success'
       );
-
-      const deadline = Date.now() + 30 * 60 * 1000;
-      let observedRun = false;
-      while (Date.now() < deadline) {
-        const state = await loadInspectionStatus(true);
-        if (state) {
-          if (state.running || state.lastRunStartedAt !== baselineStartedAt) {
-            observedRun = true;
-          }
-          if (observedRun && !state.running) {
-            break;
-          }
-        }
-        await sleep(600);
-      }
-
-      await loadFiles(true);
-      const finalState = await loadInspectionStatus(true);
-      showNotification(
-        t('auth_inspection.test_finished', {
-          defaultValue: '测试巡检结束：已检查 {{checked}}，失效 {{invalid}}',
-          checked: toNumber(finalState?.checked),
-          invalid: toNumber(finalState?.invalid),
-        }),
-        'success'
-      );
+      await loadInspectionStatus(true);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '';
       showNotification(`${t('auth_files.verify_invalid_failed')}: ${msg}`, 'error');
-    } finally {
       setTesting(false);
+      testSessionRef.current = null;
     }
-  }, [deleting, disableControls, inspection.lastRunStartedAt, inspection.running, loadFiles, loadInspectionStatus, showNotification, t, testing]);
+  }, [deleting, disableControls, inspection.lastRunStartedAt, inspection.running, loadInspectionStatus, showNotification, t, testing]);
+
+  useEffect(() => {
+    if (!testing) return;
+    const session = testSessionRef.current;
+    if (!session) {
+      setTesting(false);
+      return;
+    }
+
+    if (inspection.running || inspection.lastRunStartedAt !== session.baselineStartedAt) {
+      session.observedRun = true;
+    }
+
+    if (Date.now() >= session.deadlineAt) {
+      setTesting(false);
+      testSessionRef.current = null;
+      showNotification(
+        t('auth_inspection.test_timeout', { defaultValue: '测试巡检等待超时，请查看当前任务状态。' }),
+        'warning'
+      );
+      return;
+    }
+
+    if (session.observedRun && !inspection.running) {
+      setTesting(false);
+      testSessionRef.current = null;
+      const checked = toNumber(inspection.checked);
+      const invalid = toNumber(inspection.invalid);
+      void loadFiles(true);
+      showNotification(
+        t('auth_inspection.test_finished', {
+          defaultValue: '测试巡检结束：已检查 {{checked}}，失效 {{invalid}}',
+          checked,
+          invalid,
+        }),
+        'success'
+      );
+    }
+  }, [inspection, loadFiles, showNotification, t, testing]);
 
   const clearInvalid = useCallback(() => {
     showConfirmation({
