@@ -179,6 +179,23 @@ export const authFilesApi = {
       timeout: 300000
     }),
 
+  listInvalid: (options?: {
+    provider?: string;
+    page?: number;
+    pageSize?: number;
+    search?: string;
+  }) =>
+    apiClient.get<AuthFilesResponse>('/auth-files', {
+      params: {
+        invalid_only: true,
+        provider: options?.provider ?? 'codex',
+        page: options?.page ?? 1,
+        page_size: options?.pageSize ?? 20,
+        ...(options?.search ? { search: options.search } : {})
+      },
+      timeout: 300000
+    }),
+
   setStatus: (name: string, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -58,15 +58,6 @@ const toNumber = (value: unknown, fallback = 0): number => {
 
 const toText = (value: unknown): string => String(value ?? '').trim();
 
-const toProvider = (item: AuthFileItem): string =>
-  String(item.provider ?? item.type ?? '')
-    .trim()
-    .toLowerCase();
-
-const isRuntimeOnly = (item: AuthFileItem): boolean => toBool(item.runtimeOnly);
-const isDisabled = (item: AuthFileItem): boolean => toBool(item.disabled);
-const isInvalid = (item: AuthFileItem): boolean => toBool(item.token_invalid);
-
 const defaultInspectionState: InspectionState = {
   enabled: false,
   intervalSeconds: 3600,
@@ -112,13 +103,28 @@ const normalizeInspectionState = (raw: unknown): InspectionState => {
   };
 };
 
+const INVALID_PAGE_SIZE = 20;
+
+const formatInvalidMeta = (item: AuthFileItem): string => {
+  const provider = toText(item.provider ?? item.type).toLowerCase() || 'unknown';
+  const statusMessage = toText(item.status_message);
+  const updatedAt = toText(item.updated_at ?? item.modtime);
+  if (statusMessage && updatedAt) return `${provider} · ${statusMessage} · ${updatedAt}`;
+  if (statusMessage) return `${provider} · ${statusMessage}`;
+  if (updatedAt) return `${provider} · ${updatedAt}`;
+  return provider;
+};
+
 export function AuthInspectionPage() {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const disableControls = connectionStatus !== 'connected';
 
-  const [files, setFiles] = useState<AuthFileItem[]>([]);
+  const [invalidFiles, setInvalidFiles] = useState<AuthFileItem[]>([]);
+  const [invalidTotal, setInvalidTotal] = useState(0);
+  const [invalidPage, setInvalidPage] = useState(1);
+  const [invalidLoading, setInvalidLoading] = useState(false);
   const [error, setError] = useState('');
   const [inspection, setInspection] = useState<InspectionState>(defaultInspectionState);
   const [scheduleValue, setScheduleValue] = useState('3600');
@@ -137,16 +143,30 @@ export function AuthInspectionPage() {
     deadlineAt: number;
   } | null>(null);
 
-  const loadFiles = useCallback(
-    async (silent = false) => {
+  const loadInvalidFiles = useCallback(
+    async (page: number, silent = false) => {
+      setInvalidLoading(true);
       try {
-        const data = await authFilesApi.list();
-        setFiles(Array.isArray(data?.files) ? data.files : []);
+        const data = await authFilesApi.listInvalid({
+          provider: 'codex',
+          page,
+          pageSize: INVALID_PAGE_SIZE,
+        });
+        const nextFiles = Array.isArray(data?.files) ? data.files : [];
+        const nextTotal = toNumber(data?.total, nextFiles.length);
+        const lastPage = Math.max(1, Math.ceil(nextTotal / INVALID_PAGE_SIZE));
+        setInvalidFiles(nextFiles);
+        setInvalidTotal(nextTotal);
+        if (page > lastPage) {
+          setInvalidPage(lastPage);
+        }
         setError('');
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
         if (!silent) showNotification(msg, 'error');
         setError(msg);
+      } finally {
+        setInvalidLoading(false);
       }
     },
     [showNotification, t]
@@ -185,13 +205,17 @@ export function AuthInspectionPage() {
 
   useHeaderRefresh(
     useCallback(async () => {
-      await Promise.all([loadFiles(true), loadInspectionStatus(true)]);
-    }, [loadFiles, loadInspectionStatus])
+      await Promise.all([loadInvalidFiles(invalidPage, true), loadInspectionStatus(true)]);
+    }, [invalidPage, loadInspectionStatus, loadInvalidFiles])
   );
 
   useEffect(() => {
-    void Promise.all([loadFiles(), loadInspectionStatus()]);
-  }, [loadFiles, loadInspectionStatus]);
+    void loadInspectionStatus();
+  }, [loadInspectionStatus]);
+
+  useEffect(() => {
+    void loadInvalidFiles(invalidPage);
+  }, [invalidPage, loadInvalidFiles]);
 
   useEffect(() => {
     latestInspectionRef.current = inspection;
@@ -223,41 +247,23 @@ export function AuthInspectionPage() {
   useInterval(
     () => {
       if (disableControls || inspection.running) return;
-      void loadFiles(true);
+      void loadInvalidFiles(invalidPage, true);
     },
     disableControls ? null : 30000
   );
 
   useEffect(() => {
     if (wasRunningRef.current && !inspection.running) {
-      void loadFiles(true);
+      void loadInvalidFiles(invalidPage, true);
     }
     wasRunningRef.current = inspection.running;
-  }, [inspection.running, loadFiles]);
-
-  const codexFiles = useMemo(
-    () =>
-      files.filter((item) => {
-        if (toProvider(item) !== 'codex') return false;
-        if (isRuntimeOnly(item)) return false;
-        return true;
-      }),
-    [files]
-  );
-  const activeCodexFiles = useMemo(() => codexFiles.filter((item) => !isDisabled(item)), [codexFiles]);
-  const invalidCodexFiles = useMemo(() => activeCodexFiles.filter((item) => isInvalid(item)), [activeCodexFiles]);
-  const invalidReasonTop = useMemo(
-    () =>
-      invalidCodexFiles
-        .map((item) => ({ name: item.name, reason: toText(item.token_invalid_reason) || '未记录原因' }))
-        .slice(0, 8),
-    [invalidCodexFiles]
-  );
+  }, [inspection.running, invalidPage, loadInvalidFiles]);
 
   const progressPercent =
     inspection.total > 0
       ? Math.max(0, Math.min(100, Math.round((inspection.checked / inspection.total) * 100)))
       : 0;
+  const totalInvalidPages = Math.max(1, Math.ceil(invalidTotal / INVALID_PAGE_SIZE));
 
   const formatDuration = (seconds: number): string => {
     if (!Number.isFinite(seconds) || seconds <= 0) return '0秒';
@@ -380,7 +386,8 @@ export function AuthInspectionPage() {
       testSessionRef.current = null;
       const checked = toNumber(inspection.checked);
       const invalid = toNumber(inspection.invalid);
-      void loadFiles(true);
+      setInvalidPage(1);
+      void loadInvalidFiles(1, true);
       showNotification(
         t('auth_inspection.test_finished', {
           defaultValue: '测试巡检结束：已检查 {{checked}}，失效 {{invalid}}',
@@ -390,7 +397,7 @@ export function AuthInspectionPage() {
         'success'
       );
     }
-  }, [inspection, loadFiles, showNotification, t, testing]);
+  }, [inspection, loadInvalidFiles, showNotification, t, testing]);
 
   const clearInvalid = useCallback(() => {
     showConfirmation({
@@ -404,7 +411,8 @@ export function AuthInspectionPage() {
           const response = await authFilesApi.deleteInvalid();
           const deletedCount = toNumber(response?.deleted);
           const matchedCount = toNumber(response?.matched);
-          await loadFiles(true);
+          setInvalidPage(1);
+          await loadInvalidFiles(1, true);
           await loadInspectionStatus(true);
           if (matchedCount === 0) {
             showNotification(t('auth_files.delete_invalid_none'), 'info');
@@ -422,7 +430,12 @@ export function AuthInspectionPage() {
         }
       },
     });
-  }, [loadFiles, loadInspectionStatus, showConfirmation, showNotification, t]);
+  }, [loadInspectionStatus, loadInvalidFiles, showConfirmation, showNotification, t]);
+
+  const changeInvalidPage = useCallback((nextPage: number) => {
+    if (nextPage < 1 || nextPage > totalInvalidPages || nextPage === invalidPage) return;
+    setInvalidPage(nextPage);
+  }, [invalidPage, totalInvalidPages]);
 
   return (
     <div className={styles.container}>
@@ -520,18 +533,16 @@ export function AuthInspectionPage() {
 
         <div className={styles.summaryGrid}>
           <div className={styles.summaryCard}>
-            <div className={styles.summaryLabel}>{t('auth_inspection.total_codex', { defaultValue: 'Codex 凭证总数' })}</div>
-            <div className={styles.summaryValue}>{codexFiles.length}</div>
+            <div className={styles.summaryLabel}>{t('auth_inspection.checked_total', { defaultValue: '已检查凭证' })}</div>
+            <div className={styles.summaryValue}>{inspection.checked}</div>
           </div>
           <div className={styles.summaryCard}>
-            <div className={styles.summaryLabel}>{t('auth_inspection.active_codex', { defaultValue: '可巡检凭证' })}</div>
-            <div className={styles.summaryValue}>{activeCodexFiles.length}</div>
+            <div className={styles.summaryLabel}>{t('auth_inspection.current_invalid', { defaultValue: '当前失效 Token' })}</div>
+            <div className={`${styles.summaryValue} ${invalidTotal > 0 ? styles.dangerText : ''}`}>{invalidTotal}</div>
           </div>
           <div className={styles.summaryCard}>
-            <div className={styles.summaryLabel}>{t('auth_inspection.invalid_codex', { defaultValue: '已标记失效' })}</div>
-            <div className={`${styles.summaryValue} ${invalidCodexFiles.length > 0 ? styles.dangerText : ''}`}>
-              {invalidCodexFiles.length}
-            </div>
+            <div className={styles.summaryLabel}>{t('auth_inspection.deleted', { defaultValue: '自动清理' })}</div>
+            <div className={styles.summaryValue}>{inspection.deleted}</div>
           </div>
           <div className={styles.summaryCard}>
             <div className={styles.summaryLabel}>{t('auth_inspection.page_state', { defaultValue: '任务状态' })}</div>
@@ -547,7 +558,7 @@ export function AuthInspectionPage() {
           <div className={styles.progressMeta}>
             <span>{t('auth_inspection.progress', { defaultValue: '巡检进度' })}</span>
             <span>
-              {inspection.checked}/{inspection.total || activeCodexFiles.length} ({progressPercent}%)
+              {inspection.checked}/{inspection.total || '-'} ({progressPercent}%)
             </span>
           </div>
           <div className={`${styles.progressTrack} ${inspection.running ? styles.progressTrackRunning : ''}`}>
@@ -579,32 +590,54 @@ export function AuthInspectionPage() {
         </div>
       </Card>
 
-      <Card title={t('auth_inspection.recent_checked', { defaultValue: '最近处理轨迹（最新 10 条）' })}>
-        {inspection.recentChecked.length === 0 ? (
-          <div className={styles.emptyText}>{t('auth_inspection.recent_empty', { defaultValue: '本轮尚未产生处理轨迹。' })}</div>
-        ) : (
-          <div className={styles.trailList}>
-            {inspection.recentChecked.map((name, index) => (
-              <div key={`${name}-${index}`} className={styles.trailItem}>
-                <span className={styles.trailIndex}>#{index + 1}</span>
-                <span className={styles.trailName}>{name}</span>
-              </div>
-            ))}
+      <Card
+        title={t('auth_inspection.invalid_list_title', { defaultValue: '失效 Token 列表' })}
+        extra={
+          <div className={styles.controlBar}>
+            <div className={styles.refreshMeta}>
+              <IconTimer size={16} />
+              <span>
+                {t('auth_inspection.invalid_page_meta', {
+                  defaultValue: '共 {{total}} 条，第 {{page}} / {{pages}} 页',
+                  total: invalidTotal,
+                  page: invalidPage,
+                  pages: totalInvalidPages,
+                })}
+              </span>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => changeInvalidPage(invalidPage - 1)}
+              disabled={invalidPage <= 1 || invalidLoading}
+            >
+              {t('common.previous', { defaultValue: '上一页' })}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => changeInvalidPage(invalidPage + 1)}
+              disabled={invalidPage >= totalInvalidPages || invalidLoading}
+            >
+              {t('common.next', { defaultValue: '下一页' })}
+            </Button>
           </div>
-        )}
-      </Card>
-
-      <Card title={t('auth_inspection.invalid_top', { defaultValue: '失效原因（Top 8）' })}>
-        {invalidReasonTop.length === 0 ? (
+        }
+      >
+        {invalidLoading && invalidFiles.length === 0 ? (
           <div className={styles.emptyText}>
-            {t('auth_inspection.invalid_empty', { defaultValue: '当前没有已标记失效的 Codex 凭证。' })}
+            {t('common.loading', { defaultValue: '加载中...' })}
+          </div>
+        ) : invalidFiles.length === 0 ? (
+          <div className={styles.emptyText}>
+            {t('auth_inspection.invalid_empty', { defaultValue: '当前没有已标记失效的 Codex Token。' })}
           </div>
         ) : (
           <div className={styles.reasonList}>
-            {invalidReasonTop.map((item) => (
+            {invalidFiles.map((item) => (
               <div key={item.name} className={styles.reasonRow}>
                 <span className={styles.reasonName}>{item.name}</span>
-                <span className={styles.reasonText}>{item.reason}</span>
+                <span className={styles.reasonText}>{formatInvalidMeta(item)}</span>
               </div>
             ))}
           </div>
