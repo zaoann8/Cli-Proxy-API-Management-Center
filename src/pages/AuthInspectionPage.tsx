@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Card } from '@/components/ui/Card';
-import { Button } from '@/components/ui/Button';
-import { Select, type SelectOption } from '@/components/ui/Select';
-import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
-import { IconActivity, IconRefreshCw, IconTimer, IconTrash2 } from '@/components/ui/icons';
+import type { SelectOption } from '@/components/ui/Select';
+import { AuthInspectionInvalidList } from '@/features/authFiles/components/AuthInspectionInvalidList';
+import { AuthInspectionOverview } from '@/features/authFiles/components/AuthInspectionOverview';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useInterval } from '@/hooks/useInterval';
 import { authFilesApi } from '@/services/api';
@@ -12,10 +10,14 @@ import { useAuthStore, useNotificationStore } from '@/stores';
 import type { AuthFileItem } from '@/types';
 import styles from './AuthInspectionPage.module.scss';
 
+type InspectionAction = 'none' | 'delete' | 'disable';
+
 type InspectionState = {
   enabled: boolean;
   intervalSeconds: number;
   autoDeleteInvalid: boolean;
+  invalidAction: InspectionAction;
+  autoReenable: boolean;
   running: boolean;
   trigger: string;
   currentFile: string;
@@ -23,9 +25,14 @@ type InspectionState = {
   checked: number;
   valid: number;
   invalid: number;
+  skipped: number;
+  inconclusive: number;
+  disabled: number;
+  reenabled: number;
   deleted: number;
   total: number;
   round: number;
+  reasonCounts: Record<string, number>;
   lastError: string;
   lastRunStartedAt: string;
   lastRunFinished: string;
@@ -58,10 +65,31 @@ const toNumber = (value: unknown, fallback = 0): number => {
 
 const toText = (value: unknown): string => String(value ?? '').trim();
 
+const normalizeReasonCounts = (value: unknown): Record<string, number> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.entries(value as Record<string, unknown>).reduce<Record<string, number>>((acc, [key, raw]) => {
+    const name = toText(key);
+    const count = toNumber(raw, 0);
+    if (!name || count <= 0) return acc;
+    acc[name] = count;
+    return acc;
+  }, {});
+};
+
+const normalizeInvalidAction = (value: unknown, autoDeleteInvalid: boolean): InspectionAction => {
+  const text = toText(value).toLowerCase();
+  if (text === 'delete' || text === 'disable' || text === 'none') {
+    return text;
+  }
+  return autoDeleteInvalid ? 'delete' : 'none';
+};
+
 const defaultInspectionState: InspectionState = {
   enabled: false,
   intervalSeconds: 3600,
   autoDeleteInvalid: false,
+  invalidAction: 'none',
+  autoReenable: false,
   running: false,
   trigger: '',
   currentFile: '',
@@ -69,9 +97,14 @@ const defaultInspectionState: InspectionState = {
   checked: 0,
   valid: 0,
   invalid: 0,
+  skipped: 0,
+  inconclusive: 0,
+  disabled: 0,
+  reenabled: 0,
   deleted: 0,
   total: 0,
   round: 0,
+  reasonCounts: {},
   lastError: '',
   lastRunStartedAt: '',
   lastRunFinished: '',
@@ -80,10 +113,13 @@ const defaultInspectionState: InspectionState = {
 
 const normalizeInspectionState = (raw: unknown): InspectionState => {
   const data = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  const autoDeleteInvalid = toBool(data.auto_delete_invalid);
   return {
     enabled: toBool(data.enabled),
     intervalSeconds: Math.max(3600, toNumber(data.interval_seconds, 3600)),
-    autoDeleteInvalid: toBool(data.auto_delete_invalid),
+    autoDeleteInvalid,
+    invalidAction: normalizeInvalidAction(data.invalid_action, autoDeleteInvalid),
+    autoReenable: toBool(data.auto_reenable),
     running: toBool(data.running),
     trigger: toText(data.trigger),
     currentFile: toText(data.current_file),
@@ -93,9 +129,14 @@ const normalizeInspectionState = (raw: unknown): InspectionState => {
     checked: toNumber(data.checked),
     valid: toNumber(data.valid),
     invalid: toNumber(data.invalid),
+    skipped: toNumber(data.skipped),
+    inconclusive: toNumber(data.inconclusive),
+    disabled: toNumber(data.disabled),
+    reenabled: toNumber(data.reenabled),
     deleted: toNumber(data.deleted),
     total: toNumber(data.total),
     round: toNumber(data.round),
+    reasonCounts: normalizeReasonCounts(data.reason_counts),
     lastError: toText(data.last_error),
     lastRunStartedAt: toText(data.last_run_started_at),
     lastRunFinished: toText(data.last_run_finished),
@@ -128,7 +169,8 @@ export function AuthInspectionPage() {
   const [error, setError] = useState('');
   const [inspection, setInspection] = useState<InspectionState>(defaultInspectionState);
   const [scheduleValue, setScheduleValue] = useState('3600');
-  const [autoDeleteInvalid, setAutoDeleteInvalid] = useState(false);
+  const [invalidAction, setInvalidAction] = useState<InspectionAction>('none');
+  const [autoReenable, setAutoReenable] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -185,7 +227,8 @@ export function AuthInspectionPage() {
         latestInspectionRef.current = normalized;
         if (!configDirty) {
           setScheduleValue(normalized.enabled ? String(normalized.intervalSeconds) : 'off');
-          setAutoDeleteInvalid(normalized.autoDeleteInvalid);
+          setInvalidAction(normalized.invalidAction);
+          setAutoReenable(normalized.autoReenable);
         }
         if (!silent) setError('');
         return normalized;
@@ -284,11 +327,13 @@ export function AuthInspectionPage() {
 
     setSavingConfig(true);
     try {
-      await authFilesApi.updateInspectionConfig({
+      await authFilesApi.updateInspectionConfig(({
         enabled,
         interval_seconds: interval,
-        auto_delete_invalid: autoDeleteInvalid,
-      });
+        auto_delete_invalid: invalidAction === 'delete',
+        invalid_action: invalidAction,
+        auto_reenable: autoReenable,
+      } as Parameters<typeof authFilesApi.updateInspectionConfig>[0]));
       setConfigDirty(false);
       await loadInspectionStatus(true);
       showNotification(
@@ -301,7 +346,7 @@ export function AuthInspectionPage() {
     } finally {
       setSavingConfig(false);
     }
-  }, [autoDeleteInvalid, disableControls, loadInspectionStatus, scheduleValue, showNotification, t]);
+  }, [autoReenable, disableControls, invalidAction, loadInspectionStatus, scheduleValue, showNotification, t]);
 
   const runInspectionNow = useCallback(async () => {
     if (disableControls || inspection.running) return;
@@ -448,201 +493,50 @@ export function AuthInspectionPage() {
         </p>
       </div>
 
-      <Card
-        title={t('auth_inspection.panel_title', { defaultValue: '巡检控制台' })}
-        extra={
-          <div className={styles.controlBar}>
-            <div className={styles.refreshMeta}>
-              <IconTimer size={16} />
-              <span>
-                {inspection.enabled
-                  ? t('auth_inspection.next_schedule', {
-                      defaultValue: '下次自动任务：{{duration}}后',
-                      duration: formatDuration(countdownSec),
-                    })
-                  : t('auth_inspection.schedule_off', { defaultValue: '自动任务已关闭' })}
-              </span>
-            </div>
-            <Select
-              value={scheduleValue}
-              options={scheduleOptions}
-              onChange={(value) => {
-                setScheduleValue(value);
-                setConfigDirty(true);
-              }}
-              ariaLabel={t('auth_inspection.schedule_label', { defaultValue: '任务频率' })}
-              fullWidth={false}
-            />
-            <ToggleSwitch
-              checked={autoDeleteInvalid}
-              onChange={(value) => {
-                setAutoDeleteInvalid(value);
-                setConfigDirty(true);
-              }}
-              label={t('auth_inspection.auto_delete', { defaultValue: '自动清理失效文件' })}
-              disabled={disableControls}
-            />
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={saveInspectionConfig}
-              disabled={disableControls || !configDirty || savingConfig}
-              loading={savingConfig}
-            >
-              {t('auth_inspection.save_config', { defaultValue: '保存策略' })}
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={runInspectionNow}
-              disabled={disableControls || inspection.running || deleting || testing}
-            >
-              <span className={styles.btnInner}>
-                <IconRefreshCw size={16} />
-                <span>{t('auth_inspection.verify_now', { defaultValue: '立即触发任务' })}</span>
-              </span>
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={runInspectionTest}
-              disabled={disableControls || inspection.running || deleting || testing}
-              loading={testing}
-            >
-              <span className={styles.btnInner}>
-                <IconActivity size={16} />
-                <span>{t('auth_inspection.test_run', { defaultValue: '测试执行' })}</span>
-              </span>
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={clearInvalid}
-              disabled={disableControls || deleting || inspection.running || testing}
-              loading={deleting}
-            >
-              <span className={styles.btnInner}>
-                <IconTrash2 size={16} />
-                <span>{t('auth_inspection.clear_invalid', { defaultValue: '清理失效' })}</span>
-              </span>
-            </Button>
-          </div>
-        }
-      >
-        {error && <div className={styles.errorBox}>{error}</div>}
+      {error && <div className={styles.errorBox}>{error}</div>}
 
-        <div className={styles.summaryGrid}>
-          <div className={styles.summaryCard}>
-            <div className={styles.summaryLabel}>{t('auth_inspection.checked_total', { defaultValue: '已检查凭证' })}</div>
-            <div className={styles.summaryValue}>{inspection.checked}</div>
-          </div>
-          <div className={styles.summaryCard}>
-            <div className={styles.summaryLabel}>{t('auth_inspection.current_invalid', { defaultValue: '当前失效 Token' })}</div>
-            <div className={`${styles.summaryValue} ${invalidTotal > 0 ? styles.dangerText : ''}`}>{invalidTotal}</div>
-          </div>
-          <div className={styles.summaryCard}>
-            <div className={styles.summaryLabel}>{t('auth_inspection.deleted', { defaultValue: '自动清理' })}</div>
-            <div className={styles.summaryValue}>{inspection.deleted}</div>
-          </div>
-          <div className={styles.summaryCard}>
-            <div className={styles.summaryLabel}>{t('auth_inspection.page_state', { defaultValue: '任务状态' })}</div>
-            <div className={styles.summaryValue}>
-              {inspection.running
-                ? t('auth_inspection.executing', { defaultValue: '运行中' })
-                : t('auth_inspection.idle', { defaultValue: '空闲' })}
-            </div>
-          </div>
-        </div>
+      <AuthInspectionOverview
+        countdownLabel={formatDuration(countdownSec)}
+        disableControls={disableControls}
+        invalidAction={invalidAction}
+        invalidTotal={invalidTotal}
+        scheduleOptions={scheduleOptions}
+        scheduleValue={scheduleValue}
+        configDirty={configDirty}
+        savingConfig={savingConfig}
+        deleting={deleting}
+        testing={testing}
+        progressPercent={progressPercent}
+        autoReenable={autoReenable}
+        inspection={inspection}
+        onScheduleChange={(value) => {
+          setScheduleValue(value);
+          setConfigDirty(true);
+        }}
+        onInvalidActionChange={(value) => {
+          setInvalidAction(value);
+          setConfigDirty(true);
+        }}
+        onAutoReenableChange={(value) => {
+          setAutoReenable(value);
+          setConfigDirty(true);
+        }}
+        onSaveConfig={saveInspectionConfig}
+        onRunNow={runInspectionNow}
+        onRunTest={runInspectionTest}
+        onClearInvalid={clearInvalid}
+      />
 
-        <div className={styles.progressBlock}>
-          <div className={styles.progressMeta}>
-            <span>{t('auth_inspection.progress', { defaultValue: '巡检进度' })}</span>
-            <span>
-              {inspection.checked}/{inspection.total || '-'} ({progressPercent}%)
-            </span>
-          </div>
-          <div className={`${styles.progressTrack} ${inspection.running ? styles.progressTrackRunning : ''}`}>
-            <div className={styles.progressFill} style={{ width: `${progressPercent}%` }} />
-          </div>
-          <div className={styles.progressSubMeta}>
-            <span>{t('auth_inspection.round', { defaultValue: '批次' })}: {inspection.round}</span>
-            <span>{t('auth_inspection.valid', { defaultValue: '有效' })}: {inspection.valid}</span>
-            <span>{t('auth_inspection.invalid', { defaultValue: '失效' })}: {inspection.invalid}</span>
-            <span>{t('auth_inspection.deleted', { defaultValue: '自动清理' })}: {inspection.deleted}</span>
-          </div>
-          <div className={styles.executionLine}>
-            <div className={styles.executionState}>
-              <span className={`${styles.stateDot} ${inspection.running ? styles.stateDotRunning : styles.stateDotIdle}`} />
-              <span>{inspection.running ? t('auth_inspection.executing', { defaultValue: '任务执行中' }) : t('auth_inspection.idle', { defaultValue: '任务空闲' })}</span>
-            </div>
-            <div className={`${styles.currentFilePill} ${inspection.running ? styles.currentFilePillRunning : ''}`}>
-              {t('auth_inspection.current_file', { defaultValue: '当前处理文件' })}: {inspection.currentFile || '-'}
-            </div>
-            <div className={styles.executionMeta}>
-              {t('auth_inspection.last_run', { defaultValue: '最近完成' })}: {inspection.lastRunFinished || '-'}
-            </div>
-          </div>
-          {inspection.lastError && (
-            <div className={styles.errorBox}>
-              {t('auth_inspection.last_error', { defaultValue: '最近错误' })}: {inspection.lastError}
-            </div>
-          )}
-        </div>
-      </Card>
-
-      <Card
-        title={t('auth_inspection.invalid_list_title', { defaultValue: '失效 Token 列表' })}
-        extra={
-          <div className={styles.controlBar}>
-            <div className={styles.refreshMeta}>
-              <IconTimer size={16} />
-              <span>
-                {t('auth_inspection.invalid_page_meta', {
-                  defaultValue: '共 {{total}} 条，第 {{page}} / {{pages}} 页',
-                  total: invalidTotal,
-                  page: invalidPage,
-                  pages: totalInvalidPages,
-                })}
-              </span>
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => changeInvalidPage(invalidPage - 1)}
-              disabled={invalidPage <= 1 || invalidLoading}
-            >
-              {t('common.previous', { defaultValue: '上一页' })}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => changeInvalidPage(invalidPage + 1)}
-              disabled={invalidPage >= totalInvalidPages || invalidLoading}
-            >
-              {t('common.next', { defaultValue: '下一页' })}
-            </Button>
-          </div>
-        }
-      >
-        {invalidLoading && invalidFiles.length === 0 ? (
-          <div className={styles.emptyText}>
-            {t('common.loading', { defaultValue: '加载中...' })}
-          </div>
-        ) : invalidFiles.length === 0 ? (
-          <div className={styles.emptyText}>
-            {t('auth_inspection.invalid_empty', { defaultValue: '当前没有已标记失效的 Codex Token。' })}
-          </div>
-        ) : (
-          <div className={styles.reasonList}>
-            {invalidFiles.map((item) => (
-              <div key={item.name} className={styles.reasonRow}>
-                <span className={styles.reasonName}>{item.name}</span>
-                <span className={styles.reasonText}>{formatInvalidMeta(item)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
+      <AuthInspectionInvalidList
+        invalidFiles={invalidFiles}
+        invalidLoading={invalidLoading}
+        invalidPage={invalidPage}
+        invalidTotal={invalidTotal}
+        totalInvalidPages={totalInvalidPages}
+        onPrevPage={() => changeInvalidPage(invalidPage - 1)}
+        onNextPage={() => changeInvalidPage(invalidPage + 1)}
+        formatInvalidMeta={formatInvalidMeta}
+      />
     </div>
   );
 }
